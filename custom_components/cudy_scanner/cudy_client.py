@@ -520,18 +520,21 @@ class CudyClient:
     async def reboot(self) -> bool:
         """Reboot the router."""
         if not self.session_id:
-            _LOGGER.warning("Not logged in")
+            _LOGGER.warning("reboot called but not logged in")
             return False
 
+        _LOGGER.info("Reboot requested for %s (platform=%s)", self.host, self.platform)
         if self.platform == PLATFORM_LUCI:
             return await self._reboot_luci()
 
+        _LOGGER.warning("reboot: unsupported platform %s", self.platform)
         return False
 
     async def _reboot_luci(self) -> bool:
         """Reboot via LuCI multi-step flow."""
         session = await self._ensure_session()
         session.cookie_jar.update_cookies({"sysauth": self.session_id})
+        _LOGGER.debug("Reboot with session_id=%s...", self.session_id[:20] if self.session_id else "None")
 
         headers = {
             "Accept": "text/html, */*; q=0.01",
@@ -542,21 +545,28 @@ class CudyClient:
         try:
             # Step 1: GET reboot page to extract token
             reboot_url = f"{self.base_url}/cgi-bin/luci/admin/system/reboot/reboot"
+            _LOGGER.debug("Step 1: Fetching reboot page from %s", reboot_url)
             async with session.get(reboot_url, headers=headers) as resp:
+                _LOGGER.debug("Reboot page response: status=%s", resp.status)
                 if resp.status != 200:
+                    _LOGGER.warning("Reboot page returned status %s", resp.status)
                     return False
 
                 body = await resp.text()
+                _LOGGER.debug("Reboot page body length: %d characters", len(body))
                 token_match = re.search(
                     r'name=["\']?token["\']?\s+value=["\']?([^"\']+)', body, re.I
                 )
                 if not token_match:
+                    _LOGGER.warning("Token not found in reboot page")
                     return False
 
                 token = token_match.group(1)
                 timeclock = str(int(time.time()))
+                _LOGGER.debug("Extracted reboot token: %s..., timeclock=%s", token[:20], timeclock)
 
                 # Step 2: POST reboot form
+                _LOGGER.debug("Step 2: POSTing reboot form")
                 form_data = aiohttp.FormData()
                 form_data.add_field("token", token)
                 form_data.add_field("timeclock", timeclock)
@@ -573,18 +583,25 @@ class CudyClient:
                 async with session.post(
                     reboot_url, data=form_data, headers=post_headers
                 ) as post_resp:
+                    _LOGGER.debug("Reboot POST response: status=%s", post_resp.status)
                     if post_resp.status not in (200, 302):
+                        _LOGGER.warning("Reboot POST returned status %s", post_resp.status)
                         return False
 
                     # Step 3: GET apply endpoint to trigger reboot
                     apply_url = f"{self.base_url}/cgi-bin/luci/admin/system/reboot/apply"
+                    _LOGGER.debug("Step 3: Triggering reboot via %s", apply_url)
                     async with session.get(apply_url, headers=headers) as apply_resp:
+                        _LOGGER.debug("Reboot apply response: status=%s", apply_resp.status)
                         if apply_resp.status in (200, 302):
-                            _LOGGER.info("Reboot command sent successfully")
+                            _LOGGER.info("Reboot command sent successfully to %s", self.host)
                             return True
+                        else:
+                            _LOGGER.warning("Reboot apply returned status %s", apply_resp.status)
 
         except Exception as err:
-            _LOGGER.error("Reboot failed: %s", err)
+            _LOGGER.error("Reboot failed: %s", err, exc_info=True)
 
+        _LOGGER.warning("Reboot command failed")
         return False
 
