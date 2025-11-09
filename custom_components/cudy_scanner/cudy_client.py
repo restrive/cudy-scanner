@@ -176,14 +176,36 @@ class CudyClient:
                 salt = salt_match.group(1) if salt_match else LUC_SALT
                 
                 _LOGGER.debug(
-                    "Extracted tokens: _csrf=%s (found=%s), token=%s (found=%s), salt=%s (found=%s)",
-                    _csrf[:20] + "..." if len(_csrf) > 20 else _csrf,
+                    "Extracted tokens: _csrf=%s (found=%s), token=%s (found=%s, using_default=%s), salt=%s (found=%s, using_default=%s)",
+                    _csrf[:30] if _csrf else "(empty)",
                     bool(csrf_match),
-                    token[:20] + "..." if len(token) > 20 else token,
+                    token[:30] if token else "(empty)",
                     bool(token_match),
-                    salt[:20] + "..." if len(salt) > 20 else salt,
+                    not bool(token_match),
+                    salt[:30] if salt else "(empty)",
                     bool(salt_match),
+                    not bool(salt_match),
                 )
+                
+                if not token_match:
+                    _LOGGER.warning("Token not found in login page, using default static token")
+                if not salt_match:
+                    _LOGGER.warning("Salt not found in login page, using default static salt")
+                if not csrf_match:
+                    _LOGGER.warning("CSRF token not found in login page")
+                
+                # Log HTML snippet around token fields for debugging if extraction failed
+                if not token_match or not salt_match:
+                    _LOGGER.debug("Token/salt extraction failed, searching for form fields in HTML...")
+                    # Find form element
+                    form_match = re.search(r'<form[^>]*>(.*?)</form>', body, re.I | re.DOTALL)
+                    if form_match:
+                        form_content = form_match.group(1)
+                        # Look for input fields
+                        input_fields = re.findall(r'<input[^>]*name=["\']?(token|salt|_csrf)[^>]*>', form_content, re.I)
+                        _LOGGER.debug("Found input fields with token/salt/csrf names: %s", input_fields)
+                        # Log a snippet of form HTML
+                        _LOGGER.debug("Form HTML snippet (first 1000 chars): %s", form_content[:1000])
 
                 # Generate dynamic fields
                 # Use UTC timezone as default (most routers accept this)
