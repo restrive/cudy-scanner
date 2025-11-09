@@ -194,17 +194,32 @@ class CudyClient:
                 # Hash password
                 hashed_password = self._hash_password(self.password, salt, token)
                 _LOGGER.debug("Password hashed (length=%d, algorithm=sha256(sha256(pwd+salt)+token))", len(hashed_password))
+                _LOGGER.debug("Hash first 20 chars: %s...", hashed_password[:20])
 
                 # Step 2: POST login
                 login_post_url = f"{self.base_url}/cgi-bin/luci/admin/login"
+                
+                # Build form data
                 form_data = aiohttp.FormData()
                 form_data.add_field("_csrf", _csrf)
                 form_data.add_field("token", token)
-                form_data.add_field("salt", salt)
+                if salt:  # Only include salt if we found it
+                    form_data.add_field("salt", salt)
                 form_data.add_field("luci_password", hashed_password)
                 form_data.add_field("luci_username", self.username or "")
                 form_data.add_field("zonename", zonename)
                 form_data.add_field("timeclock", timeclock)
+                
+                # Log form data (without password)
+                _LOGGER.debug(
+                    "Login form data: _csrf=%s..., token=%s..., salt=%s..., luci_username=%s, zonename=%s, timeclock=%s, luci_password=[REDACTED]",
+                    _csrf[:20] if len(_csrf) > 20 else _csrf,
+                    token[:20] if len(token) > 20 else token,
+                    salt[:20] if salt and len(salt) > 20 else salt,
+                    self.username or "(empty)",
+                    zonename,
+                    timeclock,
+                )
 
                 post_headers = {
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -215,27 +230,65 @@ class CudyClient:
                     "Pragma": "no-cache",
                     "Referer": login_url,
                     "Upgrade-Insecure-Requests": "1",
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
                 }
-
+                
+                _LOGGER.debug("POST headers: %s", {k: v for k, v in post_headers.items()})
                 _LOGGER.debug("Step 2: POSTing login form to %s", login_post_url)
+                
                 async with session.post(
                     login_post_url, data=form_data, headers=post_headers, allow_redirects=False
                 ) as post_resp:
+                    response_headers = dict(post_resp.headers)
+                    response_cookies = {k: v.value[:20] + "..." if len(v.value) > 20 else v.value for k, v in post_resp.cookies.items()}
+                    
                     _LOGGER.debug(
-                        "Login POST response: status=%s, headers=%s, cookies=%s",
+                        "Login POST response: status=%s, content-type=%s",
                         post_resp.status,
-                        dict(post_resp.headers),
-                        {k: v.value[:20] + "..." if len(v.value) > 20 else v.value for k, v in post_resp.cookies.items()},
+                        response_headers.get("Content-Type", "unknown"),
                     )
+                    _LOGGER.debug("Response headers: %s", response_headers)
+                    _LOGGER.debug("Response cookies: %s", response_cookies)
+                    
+                    # Get response body for analysis
+                    try:
+                        response_body = await post_resp.text()
+                        _LOGGER.debug("Response body length: %d characters", len(response_body))
+                        
+                        # Check for error messages in response
+                        if "error" in response_body.lower() or "invalid" in response_body.lower() or "failed" in response_body.lower():
+                            # Extract error message if present
+                            error_match = re.search(r'(error|invalid|failed)[^<]*:?\s*([^<\n]{0,100})', response_body, re.I)
+                            if error_match:
+                                _LOGGER.warning("Error message in response: %s", error_match.group(0)[:200])
+                        
+                        # Log first 500 chars of response for debugging
+                        _LOGGER.debug("Response body preview (first 500 chars): %s", response_body[:500])
+                        
+                        # Check for login form still present (indicates failure)
+                        if "login" in response_body.lower() and "form" in response_body.lower():
+                            _LOGGER.warning("Login form still present in response - authentication likely failed")
+                        
+                        # Check for Set-Cookie header
+                        set_cookie_header = response_headers.get("Set-Cookie", "")
+                        if set_cookie_header:
+                            _LOGGER.debug("Set-Cookie header: %s", set_cookie_header[:200])
+                            sysauth_in_header = "sysauth" in set_cookie_header.lower()
+                            _LOGGER.debug("sysauth in Set-Cookie header: %s", sysauth_in_header)
+                    except Exception as body_err:
+                        _LOGGER.warning("Could not read response body: %s", body_err)
+                        response_body = ""
                     
                     # Check for sysauth cookie
                     cookies = post_resp.cookies
+                    _LOGGER.debug("Cookies object: %s", list(cookies.keys()))
                     if "sysauth" in cookies:
                         self.session_id = cookies["sysauth"].value
                         self.csrf_token = _csrf
                         _LOGGER.info("LuCI login successful - session_id=%s...", self.session_id[:20])
                         return True
+                    else:
+                        _LOGGER.debug("No sysauth cookie found in response cookies")
 
                     # Also check redirect away from login
                     if post_resp.status == 302:
@@ -244,18 +297,45 @@ class CudyClient:
                         if "login" not in location.lower():
                             # Try to extract sysauth from Set-Cookie header
                             set_cookie = post_resp.headers.get("Set-Cookie", "")
+                            if set_cookie:
+                                _LOGGER.debug("Checking Set-Cookie header for sysauth: %s", set_cookie[:200])
                             sysauth_match = re.search(r'sysauth=([^;]+)', set_cookie)
                             if sysauth_match:
                                 self.session_id = sysauth_match.group(1)
                                 self.csrf_token = _csrf
                                 _LOGGER.info("LuCI login successful (redirect) - session_id=%s...", self.session_id[:20])
                                 return True
+                            else:
+                                _LOGGER.debug("sysauth not found in Set-Cookie header")
                     
-                    _LOGGER.warning(
-                        "Login POST did not result in successful authentication: status=%s, has_sysauth_cookie=%s",
+                    # Detailed failure analysis
+                    _LOGGER.error(
+                        "Login POST failed - status=%s, has_sysauth_cookie=%s, location=%s, set_cookie_header=%s",
                         post_resp.status,
                         "sysauth" in cookies,
+                        post_resp.headers.get("Location", "none"),
+                        bool(set_cookie_header),
                     )
+                    
+                    # If 403, provide specific guidance
+                    if post_resp.status == 403:
+                        _LOGGER.error(
+                            "403 Forbidden on login POST - possible causes: "
+                            "1) Password incorrect, 2) CSRF token invalid/expired, "
+                            "3) Missing required form fields, 4) Rate limiting, "
+                            "5) Router blocking automated requests"
+                        )
+                        # Check if we have all required fields
+                        _LOGGER.debug(
+                            "Form fields check: _csrf=%s, token=%s, salt=%s, has_password=%s, username=%s, zonename=%s, timeclock=%s",
+                            bool(_csrf),
+                            bool(token),
+                            bool(salt),
+                            bool(hashed_password),
+                            bool(self.username or True),  # Username can be empty
+                            bool(zonename),
+                            bool(timeclock),
+                        )
 
         except aiohttp.ClientSSLError as err:
             _LOGGER.error("LuCI login failed (SSL error): %s", err)
