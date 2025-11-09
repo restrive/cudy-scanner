@@ -50,12 +50,15 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
 
     try:
         # Test connection and login
-        if not await client.login():
+        login_result = await client.login()
+        if not login_result:
+            _LOGGER.warning("Login returned False - authentication may have failed")
             raise InvalidAuth
 
         # Get device status to extract identity
         status = await client.get_status()
         if not status:
+            _LOGGER.warning("Status retrieval failed after successful login")
             raise CannotConnect
 
         model = status.get("model", "Unknown")

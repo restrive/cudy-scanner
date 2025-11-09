@@ -10,6 +10,7 @@ from typing import Any
 
 import aiohttp
 from aiohttp import ClientSession, ClientTimeout
+from aiohttp.client_exceptions import ClientSSLError
 
 from .const import (
     DEFAULT_TIMEOUT,
@@ -76,9 +77,17 @@ class CudyClient:
     async def _ensure_session(self) -> ClientSession:
         """Ensure we have a session."""
         if self._session is None or self._session.closed:
+            # Handle SSL verification properly
+            # For aiohttp, ssl=False disables verification, ssl=True enables it
+            if self.verify_ssl:
+                ssl_setting = True  # Use default SSL verification
+            else:
+                # Disable SSL verification for self-signed certificates
+                ssl_setting = False
+            
             self._session = ClientSession(
                 timeout=self.timeout,
-                connector=aiohttp.TCPConnector(ssl=self.verify_ssl),
+                connector=aiohttp.TCPConnector(ssl=ssl_setting),
             )
             self._own_session = True
         return self._session
@@ -198,6 +207,11 @@ class CudyClient:
                                 _LOGGER.debug("LuCI login successful (redirect)")
                                 return True
 
+        except aiohttp.ClientSSLError as err:
+            _LOGGER.error("LuCI login failed (SSL error): %s", err)
+            raise CudyClientConnectionError(
+                f"SSL certificate verification failed. Try disabling SSL verification or use HTTP instead of HTTPS."
+            ) from err
         except aiohttp.ClientError as err:
             _LOGGER.error("LuCI login failed: %s", err)
             raise CudyClientConnectionError(f"Connection error: {err}") from err
