@@ -104,12 +104,18 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
             "mac_address": mac_address,
             "serial_number": serial_number,
         }
+    except InvalidAuth:
+        # Re-raise InvalidAuth as-is
+        raise
+    except CannotConnect:
+        # Re-raise CannotConnect as-is
+        raise
     except CudyClientAuthError as err:
         raise InvalidAuth from err
     except CudyClientConnectionError as err:
         raise CannotConnect from err
     except Exception as err:
-        _LOGGER.exception("Unexpected exception")
+        _LOGGER.exception("Unexpected exception: %s", err)
         raise CannotConnect from err
 
 
