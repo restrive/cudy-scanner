@@ -52,8 +52,11 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
         # Test connection and login
         login_result = await client.login()
         if not login_result:
-            _LOGGER.warning("Login returned False - authentication may have failed")
-            raise InvalidAuth
+            _LOGGER.warning(
+                "Login failed for %s - check password and ensure router is accessible",
+                data[CONF_HOST]
+            )
+            raise InvalidAuth("Authentication failed. Please check your password.")
 
         # Get device status to extract identity
         status = await client.get_status()
