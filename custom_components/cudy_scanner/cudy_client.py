@@ -364,12 +364,14 @@ class CudyClient:
     async def get_firmware_info(self) -> dict[str, Any] | None:
         """Get firmware information."""
         if not self.session_id:
-            _LOGGER.warning("Not logged in")
+            _LOGGER.warning("get_firmware_info called but not logged in")
             return None
 
+        _LOGGER.debug("Fetching firmware information (platform=%s)", self.platform)
         if self.platform == PLATFORM_LUCI:
             return await self._get_firmware_luci()
 
+        _LOGGER.warning("get_firmware_info: unsupported platform %s", self.platform)
         return None
 
     async def _get_firmware_luci(self) -> dict[str, Any] | None:
@@ -422,18 +424,21 @@ class CudyClient:
     async def get_statistics(self) -> dict[str, Any] | None:
         """Get network statistics (WAN IP, etc.)."""
         if not self.session_id:
-            _LOGGER.warning("Not logged in")
+            _LOGGER.warning("get_statistics called but not logged in")
             return None
 
+        _LOGGER.debug("Fetching network statistics (platform=%s)", self.platform)
         if self.platform == PLATFORM_LUCI:
             return await self._get_statistics_luci()
 
+        _LOGGER.warning("get_statistics: unsupported platform %s", self.platform)
         return None
 
     async def _get_statistics_luci(self) -> dict[str, Any] | None:
         """Get statistics via LuCI JSON endpoint."""
         session = await self._ensure_session()
         session.cookie_jar.update_cookies({"sysauth": self.session_id})
+        _LOGGER.debug("Getting statistics with session_id=%s...", self.session_id[:20] if self.session_id else "None")
 
         headers = {
             "Accept": "*/*",
@@ -442,35 +447,46 @@ class CudyClient:
         }
 
         url = f"{self.base_url}/cgi-bin/luci/admin/status/statistic"
+        _LOGGER.debug("Fetching statistics from %s", url)
         try:
             async with session.get(url, headers=headers) as resp:
+                _LOGGER.debug("Statistics response: status=%s", resp.status)
                 if resp.status == 200:
                     try:
-                        return await resp.json()
-                    except Exception:
+                        data = await resp.json()
+                        _LOGGER.debug("Statistics retrieved as JSON (keys: %s)", list(data.keys()) if isinstance(data, dict) else "not a dict")
+                        return data
+                    except Exception as json_err:
                         # Fallback to HTML parsing if not JSON
+                        _LOGGER.debug("Statistics response is not JSON, parsing as HTML: %s", json_err)
                         body = await resp.text()
+                        _LOGGER.debug("Statistics HTML body length: %d characters", len(body))
                         return {"raw": body[:1000]}
+                else:
+                    _LOGGER.warning("Statistics request returned status %s", resp.status)
         except Exception as err:
-            _LOGGER.error("Statistics retrieval failed: %s", err)
+            _LOGGER.error("Statistics retrieval failed: %s", err, exc_info=True)
 
         return None
 
     async def get_clients(self) -> dict[str, Any] | None:
         """Get connected clients/device list."""
         if not self.session_id:
-            _LOGGER.warning("Not logged in")
+            _LOGGER.warning("get_clients called but not logged in")
             return None
 
+        _LOGGER.debug("Fetching connected clients (platform=%s)", self.platform)
         if self.platform == PLATFORM_LUCI:
             return await self._get_clients_luci()
 
+        _LOGGER.warning("get_clients: unsupported platform %s", self.platform)
         return None
 
     async def _get_clients_luci(self) -> dict[str, Any] | None:
         """Get connected clients via LuCI mesh/clients endpoint."""
         session = await self._ensure_session()
         session.cookie_jar.update_cookies({"sysauth": self.session_id})
+        _LOGGER.debug("Getting clients with session_id=%s...", self.session_id[:20] if self.session_id else "None")
 
         headers = {
             "Accept": "*/*",
@@ -479,17 +495,25 @@ class CudyClient:
         }
 
         url = f"{self.base_url}/cgi-bin/luci/admin/network/mesh/clients"
+        _LOGGER.debug("Fetching clients from %s", url)
         try:
             async with session.get(url, headers=headers) as resp:
+                _LOGGER.debug("Clients response: status=%s", resp.status)
                 if resp.status == 200:
                     try:
-                        return await resp.json()
-                    except Exception:
+                        data = await resp.json()
+                        _LOGGER.debug("Clients retrieved as JSON: %d client(s)", len(data) if isinstance(data, list) else "not a list")
+                        return data
+                    except Exception as json_err:
                         # Fallback to HTML parsing if not JSON
+                        _LOGGER.debug("Clients response is not JSON, parsing as HTML: %s", json_err)
                         body = await resp.text()
+                        _LOGGER.debug("Clients HTML body length: %d characters", len(body))
                         return {"raw": body[:2000], "format": "html"}
+                else:
+                    _LOGGER.warning("Clients request returned status %s", resp.status)
         except Exception as err:
-            _LOGGER.error("Clients retrieval failed: %s", err)
+            _LOGGER.error("Clients retrieval failed: %s", err, exc_info=True)
 
         return None
 
