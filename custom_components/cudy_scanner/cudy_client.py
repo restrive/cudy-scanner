@@ -1,0 +1,495 @@
+"""Async Cudy Router API Client for Home Assistant."""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import re
+import time
+from typing import Any
+
+import aiohttp
+from aiohttp import ClientSession, ClientTimeout
+
+from .const import (
+    DEFAULT_TIMEOUT,
+    DEFAULT_USE_HTTPS,
+    DEFAULT_VERIFY_SSL,
+    LUC_SALT,
+    LUC_TOKEN,
+    PLATFORM_LUCI,
+)
+
+_LOGGER = logging.getLogger(__name__)
+
+
+class CudyClientError(Exception):
+    """Base exception for Cudy client errors."""
+
+
+class CudyClientAuthError(CudyClientError):
+    """Authentication error."""
+
+
+class CudyClientConnectionError(CudyClientError):
+    """Connection error."""
+
+
+class CudyClient:
+    """Async client for interacting with Cudy router web UI/API."""
+
+    def __init__(
+        self,
+        host: str,
+        password: str,
+        username: str = "",
+        use_https: bool = DEFAULT_USE_HTTPS,
+        verify_ssl: bool = DEFAULT_VERIFY_SSL,
+        timeout: int = DEFAULT_TIMEOUT,
+        session: ClientSession | None = None,
+    ) -> None:
+        """Initialize client.
+
+        Args:
+            host: Router IP or hostname
+            password: Admin password
+            username: Admin username (optional, usually empty)
+            use_https: Use HTTPS (default: HTTP)
+            verify_ssl: Verify SSL certificates
+            timeout: Request timeout in seconds
+            session: Optional aiohttp session (for connection pooling)
+        """
+        self.host = host
+        self.username = username
+        self.password = password
+        self.protocol = "https" if use_https else "http"
+        self.base_url = f"{self.protocol}://{host}"
+        self.verify_ssl = verify_ssl
+        self.timeout = ClientTimeout(total=timeout)
+        self._session = session
+        self._own_session = False
+
+        self.session_id: str | None = None
+        self.csrf_token: str | None = None
+        self.platform: str | None = None
+
+    async def _ensure_session(self) -> ClientSession:
+        """Ensure we have a session."""
+        if self._session is None or self._session.closed:
+            self._session = ClientSession(
+                timeout=self.timeout,
+                connector=aiohttp.TCPConnector(ssl=self.verify_ssl),
+            )
+            self._own_session = True
+        return self._session
+
+    async def close(self) -> None:
+        """Close the session if we own it."""
+        if self._own_session and self._session and not self._session.closed:
+            await self._session.close()
+
+    def _hash_password(self, password: str, salt: str, token: str) -> str:
+        """Hash password using double SHA256 with salt and token.
+
+        Algorithm: sha256(sha256(password + salt) + token)
+        """
+        # Step 1: sha256(password + salt)
+        hash1 = hashlib.sha256((password + salt).encode("utf-8")).hexdigest()
+        # Step 2: sha256(hash1 + token)
+        hashed = hashlib.sha256((hash1 + token).encode("utf-8")).hexdigest()
+        return hashed
+
+    async def login(self) -> bool:
+        """Login to router and establish session."""
+        session = await self._ensure_session()
+
+        # Detect platform by trying LuCI first
+        if await self._login_luci(session):
+            self.platform = PLATFORM_LUCI
+            return True
+
+        # TODO: Add ubus and proprietary login methods
+        return False
+
+    async def _login_luci(self, session: ClientSession) -> bool:
+        """Login via LuCI interface."""
+        try:
+            # Step 1: GET login page to extract tokens
+            login_url = f"{self.base_url}/cgi-bin/luci/"
+            headers = {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-ZA,en;q=0.9",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            }
+
+            async with session.get(login_url, headers=headers, allow_redirects=False) as resp:
+                if resp.status not in (200, 302):
+                    return False
+
+                body = await resp.text()
+
+                # Extract tokens from HTML
+                csrf_match = re.search(
+                    r'name=["\']?_csrf["\']?\s+value=["\']?([^"\']+)', body, re.I
+                )
+                token_match = re.search(
+                    r'name=["\']?token["\']?\s+value=["\']?([^"\']+)', body, re.I
+                )
+                salt_match = re.search(
+                    r'name=["\']?salt["\']?\s+value=["\']?([^"\']+)', body, re.I
+                )
+
+                _csrf = csrf_match.group(1) if csrf_match else ""
+                token = token_match.group(1) if token_match else LUC_TOKEN
+                salt = salt_match.group(1) if salt_match else LUC_SALT
+
+                # Generate dynamic fields
+                # Use UTC timezone as default (most routers accept this)
+                zonename = "UTC"
+                timeclock = str(int(time.time()))
+
+                # Hash password
+                hashed_password = self._hash_password(self.password, salt, token)
+
+                # Step 2: POST login
+                login_post_url = f"{self.base_url}/cgi-bin/luci/admin/login"
+                form_data = aiohttp.FormData()
+                form_data.add_field("_csrf", _csrf)
+                form_data.add_field("token", token)
+                form_data.add_field("salt", salt)
+                form_data.add_field("luci_password", hashed_password)
+                form_data.add_field("luci_username", self.username or "")
+                form_data.add_field("zonename", zonename)
+                form_data.add_field("timeclock", timeclock)
+
+                post_headers = {
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "en-ZA,en;q=0.9",
+                    "Cache-Control": "no-cache",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Origin": self.base_url,
+                    "Pragma": "no-cache",
+                    "Referer": login_url,
+                    "Upgrade-Insecure-Requests": "1",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                }
+
+                async with session.post(
+                    login_post_url, data=form_data, headers=post_headers, allow_redirects=False
+                ) as post_resp:
+                    # Check for sysauth cookie
+                    cookies = post_resp.cookies
+                    if "sysauth" in cookies:
+                        self.session_id = cookies["sysauth"].value
+                        self.csrf_token = _csrf
+                        _LOGGER.debug("LuCI login successful")
+                        return True
+
+                    # Also check redirect away from login
+                    if post_resp.status == 302:
+                        location = post_resp.headers.get("Location", "")
+                        if "login" not in location.lower():
+                            # Try to extract sysauth from Set-Cookie header
+                            set_cookie = post_resp.headers.get("Set-Cookie", "")
+                            sysauth_match = re.search(r'sysauth=([^;]+)', set_cookie)
+                            if sysauth_match:
+                                self.session_id = sysauth_match.group(1)
+                                self.csrf_token = _csrf
+                                _LOGGER.debug("LuCI login successful (redirect)")
+                                return True
+
+        except aiohttp.ClientError as err:
+            _LOGGER.error("LuCI login failed: %s", err)
+            raise CudyClientConnectionError(f"Connection error: {err}") from err
+        except Exception as err:
+            _LOGGER.error("LuCI login failed: %s", err)
+            return False
+
+        return False
+
+    async def get_status(self) -> dict[str, Any] | None:
+        """Get router status (model)."""
+        if not self.session_id:
+            _LOGGER.warning("Not logged in")
+            return None
+
+        if self.platform == PLATFORM_LUCI:
+            return await self._get_status_luci()
+
+        return None
+
+    async def _get_status_luci(self) -> dict[str, Any] | None:
+        """Get status via LuCI."""
+        session = await self._ensure_session()
+        session.cookie_jar.update_cookies({"sysauth": self.session_id})
+
+        headers = {
+            "Accept": "text/html, */*; q=0.01",
+            "Referer": f"{self.base_url}/cgi-bin/luci/",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+
+        url = f"{self.base_url}/cgi-bin/luci/admin/status"
+        try:
+            async with session.get(url, headers=headers) as resp:
+                if resp.status == 200:
+                    body = await resp.text()
+                    status_data = {}
+                    
+                    # Extract model from title
+                    model_match = re.search(r"<title>([^<]+)</title>", body, re.I)
+                    if model_match:
+                        status_data["model"] = model_match.group(1).strip()
+                    
+                    # Extract uptime - look for common patterns
+                    # Pattern 1: "Uptime" label followed by time
+                    uptime_match = re.search(
+                        r"Uptime[^<]*</label>[^<]*<[^>]*>([^<\n]+)",
+                        body, re.I | re.DOTALL
+                    )
+                    if uptime_match:
+                        uptime_str = uptime_match.group(1).strip()
+                        status_data["uptime"] = uptime_str
+                        # Try to parse to seconds
+                        status_data["uptime_seconds"] = self._parse_uptime(uptime_str)
+                    
+                    return status_data if status_data else None
+        except Exception as err:
+            _LOGGER.error("Status retrieval failed: %s", err)
+
+        return None
+
+    def _parse_uptime(self, uptime_str: str) -> int | None:
+        """Parse uptime string to seconds."""
+        try:
+            # Common formats: "1d 2h 3m 4s", "2h 30m", "45m", "30s"
+            import re as re_module
+            total_seconds = 0
+            
+            # Days
+            days_match = re_module.search(r"(\d+)\s*d", uptime_str, re.I)
+            if days_match:
+                total_seconds += int(days_match.group(1)) * 86400
+            
+            # Hours
+            hours_match = re_module.search(r"(\d+)\s*h", uptime_str, re.I)
+            if hours_match:
+                total_seconds += int(hours_match.group(1)) * 3600
+            
+            # Minutes
+            minutes_match = re_module.search(r"(\d+)\s*m", uptime_str, re.I)
+            if minutes_match:
+                total_seconds += int(minutes_match.group(1)) * 60
+            
+            # Seconds
+            seconds_match = re_module.search(r"(\d+)\s*s", uptime_str, re.I)
+            if seconds_match:
+                total_seconds += int(seconds_match.group(1))
+            
+            return total_seconds if total_seconds > 0 else None
+        except Exception:
+            return None
+
+    async def get_firmware_info(self) -> dict[str, Any] | None:
+        """Get firmware information."""
+        if not self.session_id:
+            _LOGGER.warning("Not logged in")
+            return None
+
+        if self.platform == PLATFORM_LUCI:
+            return await self._get_firmware_luci()
+
+        return None
+
+    async def _get_firmware_luci(self) -> dict[str, Any] | None:
+        """Get firmware info via LuCI upgrade page."""
+        session = await self._ensure_session()
+        session.cookie_jar.update_cookies({"sysauth": self.session_id})
+
+        headers = {
+            "Accept": "text/html, */*; q=0.01",
+            "Referer": f"{self.base_url}/cgi-bin/luci/admin/panel",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+
+        url = f"{self.base_url}/cgi-bin/luci/admin/system/upgrade"
+        try:
+            async with session.get(url, headers=headers) as resp:
+                if resp.status == 200:
+                    body = await resp.text()
+                    firmware_data = {}
+
+                    # Extract firmware version
+                    version_match = re.search(
+                        r"Firmware\s+Version[^<]*</label>[^<]*<[^>]*>([^<\n]+)",
+                        body,
+                        re.I | re.DOTALL,
+                    )
+                    if version_match:
+                        firmware_data["version"] = version_match.group(1).strip()
+                    else:
+                        # Fallback
+                        version_match = re.search(
+                            r"form-control-static[^>]*>([\d\.\-]+)", body, re.I
+                        )
+                        if version_match:
+                            firmware_data["version"] = version_match.group(1).strip()
+
+                    # Extract hardware
+                    hardware_match = re.search(
+                        r"Hardware[^<]*</label>[^<]*<[^>]*>([^<\n]+)", body, re.I | re.DOTALL
+                    )
+                    if hardware_match:
+                        firmware_data["hardware"] = hardware_match.group(1).strip()
+
+                    return firmware_data if firmware_data else None
+        except Exception as err:
+            _LOGGER.error("Firmware retrieval failed: %s", err)
+
+        return None
+
+    async def get_statistics(self) -> dict[str, Any] | None:
+        """Get network statistics (WAN IP, etc.)."""
+        if not self.session_id:
+            _LOGGER.warning("Not logged in")
+            return None
+
+        if self.platform == PLATFORM_LUCI:
+            return await self._get_statistics_luci()
+
+        return None
+
+    async def _get_statistics_luci(self) -> dict[str, Any] | None:
+        """Get statistics via LuCI JSON endpoint."""
+        session = await self._ensure_session()
+        session.cookie_jar.update_cookies({"sysauth": self.session_id})
+
+        headers = {
+            "Accept": "*/*",
+            "Referer": f"{self.base_url}/cgi-bin/luci/",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+
+        url = f"{self.base_url}/cgi-bin/luci/admin/status/statistic"
+        try:
+            async with session.get(url, headers=headers) as resp:
+                if resp.status == 200:
+                    try:
+                        return await resp.json()
+                    except Exception:
+                        # Fallback to HTML parsing if not JSON
+                        body = await resp.text()
+                        return {"raw": body[:1000]}
+        except Exception as err:
+            _LOGGER.error("Statistics retrieval failed: %s", err)
+
+        return None
+
+    async def get_clients(self) -> dict[str, Any] | None:
+        """Get connected clients/device list."""
+        if not self.session_id:
+            _LOGGER.warning("Not logged in")
+            return None
+
+        if self.platform == PLATFORM_LUCI:
+            return await self._get_clients_luci()
+
+        return None
+
+    async def _get_clients_luci(self) -> dict[str, Any] | None:
+        """Get connected clients via LuCI mesh/clients endpoint."""
+        session = await self._ensure_session()
+        session.cookie_jar.update_cookies({"sysauth": self.session_id})
+
+        headers = {
+            "Accept": "*/*",
+            "Referer": f"{self.base_url}/cgi-bin/luci/",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+
+        url = f"{self.base_url}/cgi-bin/luci/admin/network/mesh/clients"
+        try:
+            async with session.get(url, headers=headers) as resp:
+                if resp.status == 200:
+                    try:
+                        return await resp.json()
+                    except Exception:
+                        # Fallback to HTML parsing if not JSON
+                        body = await resp.text()
+                        return {"raw": body[:2000], "format": "html"}
+        except Exception as err:
+            _LOGGER.error("Clients retrieval failed: %s", err)
+
+        return None
+
+    async def reboot(self) -> bool:
+        """Reboot the router."""
+        if not self.session_id:
+            _LOGGER.warning("Not logged in")
+            return False
+
+        if self.platform == PLATFORM_LUCI:
+            return await self._reboot_luci()
+
+        return False
+
+    async def _reboot_luci(self) -> bool:
+        """Reboot via LuCI multi-step flow."""
+        session = await self._ensure_session()
+        session.cookie_jar.update_cookies({"sysauth": self.session_id})
+
+        headers = {
+            "Accept": "text/html, */*; q=0.01",
+            "Referer": f"{self.base_url}/cgi-bin/luci/admin/panel",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+
+        try:
+            # Step 1: GET reboot page to extract token
+            reboot_url = f"{self.base_url}/cgi-bin/luci/admin/system/reboot/reboot"
+            async with session.get(reboot_url, headers=headers) as resp:
+                if resp.status != 200:
+                    return False
+
+                body = await resp.text()
+                token_match = re.search(
+                    r'name=["\']?token["\']?\s+value=["\']?([^"\']+)', body, re.I
+                )
+                if not token_match:
+                    return False
+
+                token = token_match.group(1)
+                timeclock = str(int(time.time()))
+
+                # Step 2: POST reboot form
+                form_data = aiohttp.FormData()
+                form_data.add_field("token", token)
+                form_data.add_field("timeclock", timeclock)
+                form_data.add_field("cbi.submit", "1")
+                form_data.add_field("cbi.apply", "")
+
+                post_headers = {
+                    "Accept": "*/*",
+                    "Content-Type": "multipart/form-data",
+                    "Referer": f"{self.base_url}/cgi-bin/luci/admin/panel",
+                    "X-Requested-With": "XMLHttpRequest",
+                }
+
+                async with session.post(
+                    reboot_url, data=form_data, headers=post_headers
+                ) as post_resp:
+                    if post_resp.status not in (200, 302):
+                        return False
+
+                    # Step 3: GET apply endpoint to trigger reboot
+                    apply_url = f"{self.base_url}/cgi-bin/luci/admin/system/reboot/apply"
+                    async with session.get(apply_url, headers=headers) as apply_resp:
+                        if apply_resp.status in (200, 302):
+                            _LOGGER.info("Reboot command sent successfully")
+                            return True
+
+        except Exception as err:
+            _LOGGER.error("Reboot failed: %s", err)
+
+        return False
+

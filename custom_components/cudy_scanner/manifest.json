@@ -1,0 +1,14 @@
+{
+  "domain": "cudy_scanner",
+  "name": "Cudy Scanner",
+  "version": "0.1.0",
+  "documentation": "https://github.com/beoneai/cudy-scanner",
+  "issue_tracker": "https://github.com/beoneai/cudy-scanner/issues",
+  "requirements": ["aiohttp>=3.8.0"],
+  "dependencies": [],
+  "codeowners": ["@beoneai"],
+  "iot_class": "local_polling",
+  "integration_type": "hub",
+  "config_flow": true,
+  "loggers": ["custom_components.cudy_scanner"]
+}

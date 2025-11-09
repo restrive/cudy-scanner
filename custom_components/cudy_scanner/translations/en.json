@@ -1,0 +1,25 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Cudy Router Configuration",
+        "description": "Enter your Cudy router details",
+        "data": {
+          "host": "Router IP or hostname",
+          "username": "Username (optional, usually empty)",
+          "password": "Password",
+          "use_https": "Use HTTPS",
+          "verify_ssl": "Verify SSL certificate"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to connect to router",
+      "invalid_auth": "Invalid authentication",
+      "unknown": "Unexpected error occurred"
+    },
+    "abort": {
+      "already_configured": "Device is already configured"
+    }
+  }
+}
