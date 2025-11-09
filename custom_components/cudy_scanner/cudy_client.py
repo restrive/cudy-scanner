@@ -147,22 +147,28 @@ class CudyClient:
 
             async with session.get(login_url, headers=headers, allow_redirects=False) as resp:
                 _LOGGER.debug("Login page response: status=%s, headers=%s", resp.status, dict(resp.headers))
-                if resp.status not in (200, 302):
+                # 403 is valid - it means the page requires authentication (which is expected for login page)
+                if resp.status not in (200, 302, 403):
                     _LOGGER.warning("Login page returned unexpected status: %s", resp.status)
                     return False
 
                 body = await resp.text()
                 _LOGGER.debug("Login page body length: %d characters", len(body))
+                
+                # If we got 403, the page is still accessible and contains the login form
+                if resp.status == 403:
+                    _LOGGER.debug("Login page returned 403 (expected - requires authentication)")
 
                 # Extract tokens from HTML
+                # Updated regex to handle class attributes between name and value (as in explorer)
                 csrf_match = re.search(
-                    r'name=["\']?_csrf["\']?\s+value=["\']?([^"\']+)', body, re.I
+                    r'name=["\']?_csrf["\']?\s+[^>]*value=["\']?([^"\']+)', body, re.I
                 )
                 token_match = re.search(
-                    r'name=["\']?token["\']?\s+value=["\']?([^"\']+)', body, re.I
+                    r'name=["\']?token["\']?\s+[^>]*value=["\']?([^"\']+)', body, re.I
                 )
                 salt_match = re.search(
-                    r'name=["\']?salt["\']?\s+value=["\']?([^"\']+)', body, re.I
+                    r'name=["\']?salt["\']?\s+[^>]*value=["\']?([^"\']+)', body, re.I
                 )
 
                 _csrf = csrf_match.group(1) if csrf_match else ""
