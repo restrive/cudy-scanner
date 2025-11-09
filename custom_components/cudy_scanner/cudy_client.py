@@ -73,6 +73,15 @@ class CudyClient:
         self.session_id: str | None = None
         self.csrf_token: str | None = None
         self.platform: str | None = None
+        
+        _LOGGER.debug(
+            "Initialized CudyClient: host=%s, protocol=%s, verify_ssl=%s, timeout=%s, username=%s",
+            host,
+            self.protocol,
+            verify_ssl,
+            timeout,
+            username if username else "(empty)",
+        )
 
     async def _ensure_session(self) -> ClientSession:
         """Ensure we have a session."""
@@ -110,13 +119,17 @@ class CudyClient:
 
     async def login(self) -> bool:
         """Login to router and establish session."""
+        _LOGGER.debug("Starting login process for %s", self.base_url)
         session = await self._ensure_session()
 
         # Detect platform by trying LuCI first
+        _LOGGER.debug("Attempting LuCI login")
         if await self._login_luci(session):
             self.platform = PLATFORM_LUCI
+            _LOGGER.info("Login successful via LuCI platform")
             return True
 
+        _LOGGER.warning("LuCI login failed, no other platforms available")
         # TODO: Add ubus and proprietary login methods
         return False
 
@@ -125,6 +138,7 @@ class CudyClient:
         try:
             # Step 1: GET login page to extract tokens
             login_url = f"{self.base_url}/cgi-bin/luci/"
+            _LOGGER.debug("Step 1: Fetching login page from %s", login_url)
             headers = {
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "en-ZA,en;q=0.9",
@@ -132,10 +146,13 @@ class CudyClient:
             }
 
             async with session.get(login_url, headers=headers, allow_redirects=False) as resp:
+                _LOGGER.debug("Login page response: status=%s, headers=%s", resp.status, dict(resp.headers))
                 if resp.status not in (200, 302):
+                    _LOGGER.warning("Login page returned unexpected status: %s", resp.status)
                     return False
 
                 body = await resp.text()
+                _LOGGER.debug("Login page body length: %d characters", len(body))
 
                 # Extract tokens from HTML
                 csrf_match = re.search(
@@ -151,14 +168,26 @@ class CudyClient:
                 _csrf = csrf_match.group(1) if csrf_match else ""
                 token = token_match.group(1) if token_match else LUC_TOKEN
                 salt = salt_match.group(1) if salt_match else LUC_SALT
+                
+                _LOGGER.debug(
+                    "Extracted tokens: _csrf=%s (found=%s), token=%s (found=%s), salt=%s (found=%s)",
+                    _csrf[:20] + "..." if len(_csrf) > 20 else _csrf,
+                    bool(csrf_match),
+                    token[:20] + "..." if len(token) > 20 else token,
+                    bool(token_match),
+                    salt[:20] + "..." if len(salt) > 20 else salt,
+                    bool(salt_match),
+                )
 
                 # Generate dynamic fields
                 # Use UTC timezone as default (most routers accept this)
                 zonename = "UTC"
                 timeclock = str(int(time.time()))
+                _LOGGER.debug("Generated dynamic fields: zonename=%s, timeclock=%s", zonename, timeclock)
 
                 # Hash password
                 hashed_password = self._hash_password(self.password, salt, token)
+                _LOGGER.debug("Password hashed (length=%d, algorithm=sha256(sha256(pwd+salt)+token))", len(hashed_password))
 
                 # Step 2: POST login
                 login_post_url = f"{self.base_url}/cgi-bin/luci/admin/login"
@@ -183,20 +212,29 @@ class CudyClient:
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 }
 
+                _LOGGER.debug("Step 2: POSTing login form to %s", login_post_url)
                 async with session.post(
                     login_post_url, data=form_data, headers=post_headers, allow_redirects=False
                 ) as post_resp:
+                    _LOGGER.debug(
+                        "Login POST response: status=%s, headers=%s, cookies=%s",
+                        post_resp.status,
+                        dict(post_resp.headers),
+                        {k: v.value[:20] + "..." if len(v.value) > 20 else v.value for k, v in post_resp.cookies.items()},
+                    )
+                    
                     # Check for sysauth cookie
                     cookies = post_resp.cookies
                     if "sysauth" in cookies:
                         self.session_id = cookies["sysauth"].value
                         self.csrf_token = _csrf
-                        _LOGGER.debug("LuCI login successful")
+                        _LOGGER.info("LuCI login successful - session_id=%s...", self.session_id[:20])
                         return True
 
                     # Also check redirect away from login
                     if post_resp.status == 302:
                         location = post_resp.headers.get("Location", "")
+                        _LOGGER.debug("Login POST returned 302 redirect to: %s", location)
                         if "login" not in location.lower():
                             # Try to extract sysauth from Set-Cookie header
                             set_cookie = post_resp.headers.get("Set-Cookie", "")
@@ -204,8 +242,14 @@ class CudyClient:
                             if sysauth_match:
                                 self.session_id = sysauth_match.group(1)
                                 self.csrf_token = _csrf
-                                _LOGGER.debug("LuCI login successful (redirect)")
+                                _LOGGER.info("LuCI login successful (redirect) - session_id=%s...", self.session_id[:20])
                                 return True
+                    
+                    _LOGGER.warning(
+                        "Login POST did not result in successful authentication: status=%s, has_sysauth_cookie=%s",
+                        post_resp.status,
+                        "sysauth" in cookies,
+                    )
 
         except aiohttp.ClientSSLError as err:
             _LOGGER.error("LuCI login failed (SSL error): %s", err)
@@ -224,18 +268,21 @@ class CudyClient:
     async def get_status(self) -> dict[str, Any] | None:
         """Get router status (model)."""
         if not self.session_id:
-            _LOGGER.warning("Not logged in")
+            _LOGGER.warning("get_status called but not logged in")
             return None
 
+        _LOGGER.debug("Fetching router status (platform=%s)", self.platform)
         if self.platform == PLATFORM_LUCI:
             return await self._get_status_luci()
 
+        _LOGGER.warning("get_status: unsupported platform %s", self.platform)
         return None
 
     async def _get_status_luci(self) -> dict[str, Any] | None:
         """Get status via LuCI."""
         session = await self._ensure_session()
         session.cookie_jar.update_cookies({"sysauth": self.session_id})
+        _LOGGER.debug("Getting status with session_id=%s...", self.session_id[:20] if self.session_id else "None")
 
         headers = {
             "Accept": "text/html, */*; q=0.01",
@@ -244,16 +291,20 @@ class CudyClient:
         }
 
         url = f"{self.base_url}/cgi-bin/luci/admin/status"
+        _LOGGER.debug("Fetching status from %s", url)
         try:
             async with session.get(url, headers=headers) as resp:
+                _LOGGER.debug("Status response: status=%s", resp.status)
                 if resp.status == 200:
                     body = await resp.text()
+                    _LOGGER.debug("Status page body length: %d characters", len(body))
                     status_data = {}
                     
                     # Extract model from title
                     model_match = re.search(r"<title>([^<]+)</title>", body, re.I)
                     if model_match:
                         status_data["model"] = model_match.group(1).strip()
+                        _LOGGER.debug("Extracted model: %s", status_data["model"])
                     
                     # Extract uptime - look for common patterns
                     # Pattern 1: "Uptime" label followed by time
@@ -266,10 +317,16 @@ class CudyClient:
                         status_data["uptime"] = uptime_str
                         # Try to parse to seconds
                         status_data["uptime_seconds"] = self._parse_uptime(uptime_str)
+                        _LOGGER.debug("Extracted uptime: %s (%s seconds)", uptime_str, status_data.get("uptime_seconds"))
+                    else:
+                        _LOGGER.debug("Uptime not found in status page")
                     
+                    _LOGGER.debug("Status data: %s", status_data)
                     return status_data if status_data else None
+                else:
+                    _LOGGER.warning("Status request returned status %s", resp.status)
         except Exception as err:
-            _LOGGER.error("Status retrieval failed: %s", err)
+            _LOGGER.error("Status retrieval failed: %s", err, exc_info=True)
 
         return None
 

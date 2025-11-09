@@ -40,6 +40,14 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
 
     Data has the keys from STEP_USER_DATA_SCHEMA with values provided by the user.
     """
+    _LOGGER.debug(
+        "Validating input: host=%s, use_https=%s, verify_ssl=%s, username=%s",
+        data[CONF_HOST],
+        data.get(CONF_USE_HTTPS, DEFAULT_USE_HTTPS),
+        data.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL),
+        data.get(CONF_USERNAME, "") or "(empty)",
+    )
+    
     client = CudyClient(
         host=data[CONF_HOST],
         password=data[CONF_PASSWORD],
@@ -50,52 +58,71 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
 
     try:
         # Test connection and login
+        _LOGGER.debug("Attempting login to %s", data[CONF_HOST])
         login_result = await client.login()
         if not login_result:
             _LOGGER.warning(
-                "Login failed for %s - check password and ensure router is accessible",
-                data[CONF_HOST]
+                "Login failed for %s - check password and ensure router is accessible (platform=%s, session_id=%s)",
+                data[CONF_HOST],
+                client.platform,
+                client.session_id[:20] + "..." if client.session_id else None,
             )
             raise InvalidAuth("Authentication failed. Please check your password.")
+        
+        _LOGGER.debug("Login successful, platform=%s, session_id=%s...", client.platform, client.session_id[:20] if client.session_id else None)
 
         # Get device status to extract identity
+        _LOGGER.debug("Fetching device status")
         status = await client.get_status()
         if not status:
             _LOGGER.warning("Status retrieval failed after successful login")
             raise CannotConnect
 
         model = status.get("model", "Unknown")
+        _LOGGER.debug("Device model: %s", model)
+        
+        _LOGGER.debug("Fetching firmware information")
         firmware = await client.get_firmware_info()
         firmware_version = firmware.get("version") if firmware else None
+        _LOGGER.debug("Firmware version: %s", firmware_version)
 
         # Try to get clients to extract MAC/serial for stable unique_id
         mac_address = None
         serial_number = None
         
+        _LOGGER.debug("Attempting to fetch clients list for MAC/serial extraction")
         try:
             clients = await client.get_clients()
             if clients and isinstance(clients, list) and len(clients) > 0:
+                _LOGGER.debug("Found %d client(s) in list", len(clients))
                 # First client is usually the router itself
                 first_client = clients[0]
                 if isinstance(first_client, dict):
                     mac_address = first_client.get("macaddr")
                     serial_number = first_client.get("sn")
+                    _LOGGER.debug("First client MAC: %s, Serial: %s", mac_address, serial_number)
                     # Also check sysreport for MAC
                     sysreport = first_client.get("sysreport", {})
                     if isinstance(sysreport, dict) and not mac_address:
                         mac_address = sysreport.get("macaddr")
-        except Exception:
+                        _LOGGER.debug("MAC from sysreport: %s", mac_address)
+            else:
+                _LOGGER.debug("Clients list is empty or not a list")
+        except Exception as err:
             # If clients fetch fails, continue with model-based ID
-            pass
+            _LOGGER.debug("Clients fetch failed (non-critical): %s", err, exc_info=True)
 
         # Generate stable unique_id: prefer MAC > serial > model+host
         if mac_address:
             unique_id = mac_address.replace(":", "").upper()
+            _LOGGER.debug("Using MAC address for unique_id: %s", unique_id)
         elif serial_number:
             unique_id = serial_number
+            _LOGGER.debug("Using serial number for unique_id: %s", unique_id)
         else:
             # Fallback to model+host (not stable across IP changes)
             unique_id = f"{model}_{data[CONF_HOST]}"
+            _LOGGER.warning("Using fallback unique_id (model+host) - not stable across IP changes: %s", unique_id)
 
         await client.close()
 
