@@ -161,6 +161,7 @@ class CudyClient:
 
                 # Extract tokens from HTML
                 # Updated regex to handle class attributes between name and value (as in explorer)
+                _LOGGER.debug("Searching for form tokens in login page HTML (body length: %d chars)...", len(body))
                 csrf_match = re.search(
                     r'name=["\']?_csrf["\']?\s+[^>]*value=["\']?([^"\']+)', body, re.I
                 )
