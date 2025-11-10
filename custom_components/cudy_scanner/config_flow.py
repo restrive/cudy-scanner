@@ -24,11 +24,32 @@ from .cudy_client import CudyClient, CudyClientAuthError, CudyClientConnectionEr
 
 _LOGGER = logging.getLogger(__name__)
 
+def validate_host(host: str) -> str:
+    """Validate host input."""
+    host = host.strip()
+    if not host:
+        raise vol.Invalid("Host/IP address cannot be empty")
+    # Basic validation - should be IP or hostname
+    if len(host) > 253:  # Max hostname length
+        raise vol.Invalid("Host/IP address is too long (max 253 characters)")
+    return host
+
+
+def validate_password(password: str) -> str:
+    """Validate password input."""
+    password = password.strip()
+    if not password:
+        raise vol.Invalid("Password cannot be empty")
+    if len(password) > 256:  # Reasonable max length
+        raise vol.Invalid("Password is too long (max 256 characters)")
+    return password
+
+
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_HOST): str,
+        vol.Required(CONF_HOST, msg="Host/IP address is required"): vol.All(str, validate_host),
         vol.Optional(CONF_USERNAME, default=""): str,
-        vol.Required(CONF_PASSWORD): str,
+        vol.Required(CONF_PASSWORD, msg="Password is required"): vol.All(str, validate_password),
         vol.Optional(CONF_USE_HTTPS, default=DEFAULT_USE_HTTPS): bool,
         vol.Optional(CONF_VERIFY_SSL, default=DEFAULT_VERIFY_SSL): bool,
     }
@@ -67,7 +88,13 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
                 client.platform,
                 client.session_id[:20] + "..." if client.session_id else None,
             )
-            raise InvalidAuth("Authentication failed. Please check your password.")
+            raise InvalidAuth(
+                "Authentication failed. Please check:\n"
+                "- Password is correct\n"
+                "- Username is correct (if required)\n"
+                "- Router is accessible from this device\n"
+                "- Router firewall allows connections"
+            )
         
         _LOGGER.debug("Login successful, platform=%s, session_id=%s...", client.platform, client.session_id[:20] if client.session_id else None)
 

@@ -2,9 +2,10 @@
 
 A Home Assistant custom integration to connect to Cudy routers (WR3600, WR6500) on the local network, read configuration/status, and expose safe actions like reboot.
 
-**Status:** ✅ MVP Complete - Ready for Testing  
+**Status:** ⚠️ MVP Core Features Complete - Testing Required  
 **Version:** 0.1.0  
-**Repository:** https://github.com/restrive/cudy-scanner
+**Repository:** https://github.com/restrive/cudy-scanner  
+**Note:** Core features implemented and tested with explorer client. Home Assistant integration needs validation testing with real hardware.
 
 ## Features
 
@@ -100,9 +101,9 @@ Or use the reboot button entity directly.
 
 ## Supported Models
 
-- ✅ **WR3600** - Tested and working
-- ✅ **WR6500** - Tested and working
-- ⚠️ Other Cudy models with LuCI interface may work
+- ✅ **WR3600** - Explorer client tested, HA integration needs validation
+- ✅ **WR6500** - Explorer client tested, HA integration needs validation
+- ⚠️ Other Cudy models with LuCI interface may work (untested)
 
 ## Requirements
 
@@ -218,4 +219,11 @@ Contributions are welcome! Please:
 
 **Version:** 0.1.0  
 **Last Updated:** 2025-11-09  
-**Status:** MVP Complete - Ready for Testing
+**Status:** MVP Core Features Complete - Testing Required
+
+## Known Limitations
+
+- **Discovery:** Manual IP entry required (SSDP/mDNS discovery planned)
+- **IP Change:** Device identity is stable (MAC/serial), but automatic rediscovery not yet implemented
+- **Testing:** Integration needs validation with real hardware (explorer client was tested)
+- **Error Messages:** Some technical errors may need user-friendly improvements

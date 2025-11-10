@@ -1,7 +1,9 @@
 # Cudy Scanner - Missing Items & Remaining Work
 
 **Date:** 2025-11-09  
-**Status:** Core implemented, several MVP features missing
+**Status:** Core MVP features implemented, discovery and advanced features missing
+
+**Note:** This document may be partially outdated. See COMPLETED_FEATURES.md for what has been implemented.
 
 ## 🔴 Critical Missing Items (MVP Requirements)
 
@@ -24,20 +26,23 @@
 ---
 
 ### 2. IP Change Resilience
-**Status:** ⚠️ Partially implemented (basic structure only)  
+**Status:** ✅ Partially implemented (MAC/serial extraction working, rediscovery missing)  
 **Priority:** High (MVP requirement)
 
-**Missing:**
-- MAC address extraction from clients endpoint
-- Serial number extraction from clients endpoint
-- Stable unique_id based on MAC/serial (not host+model)
-- Rediscovery mechanism on connection failure
-- Config entry update with new IP when found
-- ARP/SSDP/mDNS rediscovery integration
+**Implemented:**
+- ✅ MAC address extraction from clients endpoint
+- ✅ Serial number extraction from clients endpoint
+- ✅ Stable unique_id based on MAC/serial (not host+model)
+- ✅ Session cleared on connection failure
+
+**Still Missing:**
+- ❌ Automatic rediscovery mechanism on connection failure
+- ❌ Config entry update with new IP when found
+- ❌ ARP/SSDP/mDNS rediscovery integration
 
 **Current state:**
-- Unique ID is `{host}_{model}` - not stable across IP changes
-- No rediscovery logic
+- Unique ID is stable (MAC/serial) - survives IP changes
+- No automatic rediscovery when IP changes
 
 **Files to modify:**
 - `cudy_client.py` - Add `get_clients()` method (exists in explorer, not in HA client)
@@ -67,17 +72,18 @@
 ---
 
 ### 4. Reboot Service Registration
-**Status:** ⚠️ Button exists, but no service  
+**Status:** ✅ Complete  
 **Priority:** Medium (MVP mentions service)
 
-**Missing:**
-- Service registration: `cudy_scanner.reboot`
-- Service schema with confirmation flag
-- Service handler in `__init__.py`
+**Implemented:**
+- ✅ Service registration: `cudy_scanner.reboot`
+- ✅ Service schema with device_id
+- ✅ Service handler in `__init__.py`
+- ✅ Cooldown protection (60 seconds)
 
 **Current state:**
 - Reboot button works
-- No service exposed
+- Reboot service works
 
 **Files to modify:**
 - `__init__.py` - Register service
@@ -88,17 +94,17 @@
 ---
 
 ### 5. Uptime Sensor
-**Status:** ❌ Not implemented  
+**Status:** ✅ Complete  
 **Priority:** Medium (MVP requirement)
 
-**Missing:**
-- Uptime parsing from status HTML
-- Uptime sensor entity
-- Duration formatting
+**Implemented:**
+- ✅ Uptime parsing from status HTML
+- ✅ Uptime sensor entity
+- ✅ Duration formatting (seconds)
 
 **Current state:**
-- Status endpoint returns HTML but uptime not parsed
-- No uptime sensor created
+- Uptime sensor working
+- Supports multiple time formats
 
 **Files to modify:**
 - `cudy_client.py` - Add uptime parsing in `_get_status_luci()`
